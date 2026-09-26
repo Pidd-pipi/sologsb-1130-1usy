@@ -16,6 +16,7 @@ import ShotProgress from '../components/common/ShotProgress.vue';
 import StatusTag from '../components/common/StatusTag.vue';
 import EmptyState from '../components/common/EmptyState.vue';
 import type { FrameEntry } from '../types/frame';
+import type { Shot } from '../types/shot';
 
 const router = useRouter();
 const shotStore = useShotStore();
@@ -57,6 +58,61 @@ function goDetail(id: number | undefined) {
   if (typeof id !== 'number') return;
   void frameStore.loadForShot(id);
   void router.push(`/shots/${id}`);
+}
+
+/* ---------------- 复制镜头 ---------------- */
+
+const copySource = ref<Shot | null>(null);
+const copyCode = ref('');
+const copyError = ref('');
+const copying = ref(false);
+
+/** 建议新镜号：取现有镜号最大数字 +1 */
+const suggestedCopyCode = computed(() => {
+  const nums = shots.value
+    .map((s) => Number((s.code.match(/\d+/) ?? [])[0]))
+    .filter((n) => Number.isFinite(n));
+  const next = nums.length ? Math.max(...nums) + 1 : 1;
+  return `S${String(next).padStart(2, '0')}`;
+});
+
+function openCopy(shot: Shot) {
+  copySource.value = shot;
+  copyCode.value = suggestedCopyCode.value;
+  copyError.value = '';
+}
+
+function closeCopy() {
+  if (copying.value) return;
+  copySource.value = null;
+}
+
+function validateCopy(): string {
+  const code = copyCode.value.trim();
+  if (!code) return '请填写新镜号';
+  if (!/^[A-Za-z]{1,3}\d{1,3}$/.test(code)) return '镜号格式形如 S01';
+  if (shots.value.some((s) => s.code.trim().toUpperCase() === code.toUpperCase())) {
+    return '该镜号已存在，请换一个';
+  }
+  return '';
+}
+
+async function submitCopy() {
+  const source = copySource.value;
+  if (!source || typeof source.id !== 'number') return;
+  copyError.value = validateCopy();
+  if (copyError.value) return;
+  copying.value = true;
+  try {
+    const saved = await shotStore.duplicate(source.id, copyCode.value);
+    copySource.value = null;
+    await frameStore.loadForShot(saved.id as number);
+    await router.push(`/shots/${saved.id}`);
+  } catch (e) {
+    copyError.value = e instanceof Error ? e.message : '复制失败，请重试';
+  } finally {
+    copying.value = false;
+  }
 }
 </script>
 
@@ -146,7 +202,15 @@ function goDetail(id: number | undefined) {
             </td>
             <td>{{ row.shot.owner || '未指派' }}</td>
             <td>
-              <button type="button" class="btn small" @click="goDetail(row.shot.id)">查看详情</button>
+              <div class="row-actions">
+                <button type="button" class="btn small" @click="goDetail(row.shot.id)">查看详情</button>
+                <button
+                  type="button"
+                  class="btn small"
+                  data-testid="copy-shot"
+                  @click="openCopy(row.shot)"
+                >复制</button>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -155,6 +219,41 @@ function goDetail(id: number | undefined) {
       <p v-if="rows.length" class="muted footer-note">
         最近更新：{{ formatDateTime(Math.max(...shots.map((s) => s.updatedAt || 0))) }}
       </p>
+    </div>
+
+    <div v-if="copySource" class="modal-mask" data-testid="copy-dialog" @click.self="closeCopy">
+      <div class="modal" role="dialog" aria-modal="true" aria-label="复制镜头">
+        <h3>复制镜头 {{ copySource.code }}</h3>
+        <p class="muted">
+          新镜头将沿用 {{ copySource.sceneName }} 的帧率（{{ copySource.fps }} fps）、时长、
+          起始帧（{{ copySource.startFrame }}）、逐帧曝光设置与道具轨迹；实拍记录不会复制。
+        </p>
+        <label class="field">
+          <span>新镜号</span>
+          <input
+            v-model="copyCode"
+            type="text"
+            maxlength="8"
+            data-testid="copy-code"
+            :disabled="copying"
+            @keyup.enter="submitCopy"
+          />
+        </label>
+        <button type="button" class="link-btn" @click="copyCode = suggestedCopyCode">
+          使用建议镜号 {{ suggestedCopyCode }}
+        </button>
+        <p v-if="copyError" class="err" data-testid="copy-error">{{ copyError }}</p>
+        <div class="modal-actions">
+          <button
+            type="button"
+            class="btn primary"
+            :disabled="copying"
+            data-testid="copy-submit"
+            @click="submitCopy"
+          >{{ copying ? '复制中…' : '复制并进入新镜头' }}</button>
+          <button type="button" class="btn" :disabled="copying" @click="closeCopy">取消</button>
+        </div>
+      </div>
     </div>
   </section>
 </template>
@@ -277,4 +376,74 @@ h1 {
 .footer-note {
   margin: 10px 0 0;
 }
+.row-actions {
+  display: flex;
+  gap: 8px;
+}
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(31, 45, 61, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal {
+  width: 380px;
+  max-width: calc(100vw - 32px);
+  background: #fff;
+  border-radius: 10px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.modal h3 {
+  margin: 0;
+  font-size: 16px;
+}
+.modal .muted {
+  margin: 0;
+  line-height: 1.6;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #5a6472;
+}
+.field input {
+  height: 32px;
+  border: 1px solid #cfd6e0;
+  border-radius: 6px;
+  padding: 0 8px;
+  font-size: 13px;
+  background: #fff;
+  color: #1f2d3d;
+}
+.link-btn {
+  align-self: flex-start;
+  border: none;
+  background: none;
+  color: #2f6fed;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+}
+.err {
+  margin: 0;
+  color: #c45656;
+  font-size: 12px;
+}
+.modal-actions {
+  display: flex;
+  gap: 10px;
+}
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 </style>

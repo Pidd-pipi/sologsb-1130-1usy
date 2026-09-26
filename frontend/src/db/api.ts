@@ -28,6 +28,49 @@ export async function updateShot(id: number, patch: Partial<Shot>): Promise<void
   await db.shots.update(id, toPlain({ ...patch, updatedAt: Date.now() }));
 }
 
+/**
+ * 复制镜头：新镜头沿用原镜头的帧率、时长、起始帧、逐帧曝光设置与道具轨迹，
+ * 不复制实拍记录（takes），状态与进度归零。
+ * 整个写入包在一个事务里：镜号冲突或任一一步失败时整体回滚，
+ * 既不改原镜头，也不留下不完整的新记录。
+ */
+export async function duplicateShot(sourceId: number, rawCode: string): Promise<number> {
+  const code = rawCode.trim().toUpperCase();
+  if (!code) throw new Error('请填写新镜号');
+  return db.transaction('rw', db.shots, db.frames, db.props, async () => {
+    const source = await db.shots.get(sourceId);
+    if (!source) throw new Error('原镜头不存在或已被删除');
+    const all = await db.shots.toArray();
+    if (all.some((s) => s.code.trim().toUpperCase() === code)) {
+      throw new Error(`镜号 ${code} 已存在，未做任何改动`);
+    }
+    const now = Date.now();
+    const { id: _sourceId, ...rest } = source;
+    const shot: Shot = toPlain({
+      ...rest,
+      code,
+      status: '未开机',
+      progressPercent: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const newId = await db.shots.add(shot);
+    const frames = await db.frames.where('shotId').equals(sourceId).toArray();
+    if (frames.length) {
+      await db.frames.bulkAdd(
+        frames.map(({ id: _frameId, ...f }) => toPlain({ ...f, shotId: newId, updatedAt: now })),
+      );
+    }
+    const props = await db.props.where('shotId').equals(sourceId).toArray();
+    if (props.length) {
+      await db.props.bulkAdd(
+        props.map(({ id: _propId, ...p }) => toPlain({ ...p, shotId: newId, updatedAt: now })),
+      );
+    }
+    return newId;
+  });
+}
+
 export async function deleteShot(id: number): Promise<void> {
   await db.transaction('rw', db.shots, db.frames, db.props, db.takes, async () => {
     await db.frames.where('shotId').equals(id).delete();

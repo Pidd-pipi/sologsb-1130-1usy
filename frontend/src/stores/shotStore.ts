@@ -88,6 +88,15 @@ export const useShotStore = defineStore('shot', {
         .map((row, idx) => ({ ...row, frameNo: shot.startFrame + idx }));
       await api.updateFrames(next);
     },
+    /** 复制镜头：新镜头沿用帧率/时长/帧区间/逐帧曝光与道具轨迹，不继承实拍记录 */
+    async duplicate(sourceId: number, code: string): Promise<Shot> {
+      const id = await api.duplicateShot(sourceId, code);
+      const saved = await api.getShot(id);
+      if (!saved) throw new Error('复制失败，请重试');
+      this.shots = [...this.shots, saved].sort((a, b) => a.code.localeCompare(b.code, 'zh-Hans-CN'));
+      this.currentId = id;
+      return saved;
+    },
     async setStatus(id: number, status: Shot['status']) {
       await api.updateShot(id, { status });
       this.shots = this.shots.map((s) => (s.id === id ? { ...s, status, updatedAt: Date.now() } : s));
