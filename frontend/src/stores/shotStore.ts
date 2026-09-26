@@ -101,6 +101,21 @@ export const useShotStore = defineStore('shot', {
       this.shots = this.shots.filter((s) => s.id !== id);
       if (this.currentId === id) this.currentId = null;
     },
+    /**
+     * 同机位复制：帧率、时长、起始帧、逐帧曝光设置与道具轨迹全部沿用原镜头，
+     * 实拍记录不继承（状态回到「未开机」、进度清零）。
+     * 镜号重复等失败由 db 层事务兜底，不会改动原镜头或留下半成品。
+     */
+    async duplicate(sourceId: number, newCode: string): Promise<Shot> {
+      const source = this.shots.find((s) => s.id === sourceId);
+      if (!source) throw new Error('原镜头不存在，可能已被删除');
+      const id = await api.duplicateShot(sourceId, newCode);
+      const saved = await api.getShot(id);
+      if (!saved) throw new Error('复制结果读取失败');
+      this.shots = [...this.shots, saved].sort((a, b) => a.code.localeCompare(b.code, 'zh-Hans-CN'));
+      this.currentId = id;
+      return saved;
+    },
     /** 依据时长给出帧区间预览（不落库） */
     previewRange(startFrame: number, durationSec: number, fps: number) {
       return buildFrameRange(startFrame, durationSec, fps);

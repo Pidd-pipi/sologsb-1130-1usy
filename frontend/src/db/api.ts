@@ -37,6 +37,56 @@ export async function deleteShot(id: number): Promise<void> {
   });
 }
 
+/**
+ * 同机位复制镜头：在单个事务内复制镜头本身、每一帧的曝光/位移条目与道具轨迹。
+ * 镜号重复（大小写不敏感）时整个事务回滚——原镜头不动，也不会留下只复制了一半的新记录。
+ * 实拍记录（takes）不复制，新镜头从「未开机」重新计数。
+ * 返回复制后新镜头的 id。
+ */
+export async function duplicateShot(sourceId: number, newCode: string): Promise<number> {
+  const code = newCode.trim();
+  return db.transaction('rw', db.shots, db.frames, db.props, async () => {
+    const source = await db.shots.get(sourceId);
+    if (!source) throw new Error('原镜头不存在，可能已被删除');
+
+    // 库内再查一次重复：即使调用方漏检，重复镜号也会在写入前中止事务
+    const dup = await db.shots.where('code').equalsIgnoreCase(code).first();
+    if (dup) throw new Error('该镜号已存在，请换一个');
+
+    const now = Date.now();
+    const { id: _omitId, ...sourceRest } = source;
+    const cloned: Shot = toPlain({
+      ...sourceRest,
+      code,
+      status: '未开机',
+      progressPercent: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const [newShotId] = await db.shots.bulkAdd([cloned], { allKeys: true });
+
+    // 逐帧复制曝光设置与道具位移（不含实拍记录），帧序号与原镜头一一对应
+    const sourceFrames = await db.frames.where('shotId').equals(sourceId).toArray();
+    if (sourceFrames.length) {
+      const clonedFrames: FrameEntry[] = sourceFrames.map(({ id: _f, ...rest }) =>
+        toPlain({ ...rest, shotId: newShotId, updatedAt: now }),
+      );
+      await db.frames.bulkAdd(clonedFrames);
+    }
+
+    // 复制道具轨迹（帧区间、位置、旋转、固定方式全部沿用）
+    const sourceProps = await db.props.where('shotId').equals(sourceId).toArray();
+    if (sourceProps.length) {
+      const clonedProps: PropState[] = sourceProps.map(({ id: _p, ...rest }) =>
+        toPlain({ ...rest, shotId: newShotId, updatedAt: now }),
+      );
+      await db.props.bulkAdd(clonedProps);
+    }
+
+    return newShotId;
+  });
+}
+
 /* ---------------- frames ---------------- */
 
 export async function listFrames(shotId: number): Promise<FrameEntry[]> {
